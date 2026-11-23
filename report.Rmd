@@ -1,0 +1,188 @@
+---
+title: "Did Derrick Rose Deserve the 2010-11 MVP?"
+author: "Ife Obateru"
+output:
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+library(tidyverse)
+library(ggrepel)
+```
+
+## The question
+
+In 2011, Derrick Rose became the youngest MVP in NBA history at just 22 years old, winning 113 of 121 first-place votes after leading the Chicago Bulls to the league's best record (62-20). However, the award is still debated today, because other players, especially LeBron James, put up stronger numbers that season. In this report, I use MVP voting data and regression analysis to test whether Rose's MVP was backed up by the stats, or whether something else drove the voters.
+
+## The data
+
+Data comes from Basketball-Reference: official MVP voting results (with each candidate's stats) and team ratings for the 2005-06 through 2014-15 seasons.
+
+```{r load-data}
+mvp <- read_csv("data/mvp_2011.csv")
+
+mvp <- mvp |>
+  select(-`-9999`) |>
+  rename(
+    pts_won = `Pts Won`,
+    pts_max = `Pts Max`,
+    fg_pct  = `FG%`,
+    fg3_pct = `3P%`,
+    ft_pct  = `FT%`,
+    ws_48   = `WS/48`
+  ) |>
+  mutate(
+    Rank    = parse_number(Rank),
+    is_rose = Player == "Derrick Rose"
+  )
+```
+
+## How Rose compared to other candidates
+
+Rose ranked 4th in Win Shares and 6th in scoring among the 13 players who received MVP votes, yet he received 98% of the possible vote points.
+
+```{r chart-win-shares}
+ggplot(mvp, aes(x = WS, y = reorder(Player, WS), fill = is_rose)) +
+  geom_col() +
+  scale_fill_manual(values = c("TRUE" = "#2a78d6", "FALSE" = "grey70"), guide = "none") +
+  labs(
+    title = "Rose ranked 4th in Win Shares among MVP vote-getters",
+    x = "Win Shares",
+    y = NULL
+  ) +
+  theme_minimal()
+```
+
+```{r chart-points}
+ggplot(mvp, aes(x = PTS, y = reorder(Player, PTS), fill = is_rose)) +
+  geom_col() +
+  scale_fill_manual(values = c("TRUE" = "#2a78d6", "FALSE" = "grey70"), guide = "none") +
+  labs(
+    title = "Rose ranked 6th in scoring among MVP vote-getters",
+    x = "Points per game",
+    y = NULL
+  ) +
+  theme_minimal()
+```
+
+```{r chart-scatter}
+ggplot(mvp, aes(x = WS, y = Share, color = is_rose)) +
+  geom_point(size = 3) +
+  geom_text_repel(aes(label = Player), size = 3) +
+  scale_color_manual(values = c("TRUE" = "#2a78d6", "FALSE" = "grey50"), guide = "none") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(
+    title = "Rose won 98% of the vote share despite ranking 4th in Win Shares",
+    x = "Win Shares",
+    y = "MVP vote share"
+  ) +
+  theme_minimal()
+```
+
+## What do MVP voters usually reward?
+
+To learn what voters typically reward, I trained regression models on nine other seasons of MVP voting (2006-2015, excluding 2011), then used them to predict the 2011 vote.
+
+```{r load-all-seasons}
+files <- list.files("data", pattern = "^mvp_\\d{4}\\.csv$", full.names = TRUE)
+
+all_mvp <- read_csv(files, id = "file") |>
+  select(-`-9999`) |>
+  rename(
+    pts_won = `Pts Won`,
+    pts_max = `Pts Max`,
+    fg_pct  = `FG%`,
+    fg3_pct = `3P%`,
+    ft_pct  = `FT%`,
+    ws_48   = `WS/48`
+  ) |>
+  mutate(
+    Rank   = parse_number(Rank),
+    season = parse_number(file)
+  )
+
+team_files <- list.files("data", pattern = "^teams_\\d{4}\\.csv$", full.names = TRUE)
+
+teams <- read_csv(team_files, id = "file") |>
+  mutate(
+    season = parse_number(file),
+    Team   = str_remove(Team, "\\*")
+  ) |>
+  select(season, Team, W, L, MOV)
+
+abbrevs <- read_csv("data/team_abbrevs.csv")
+
+all_mvp <- all_mvp |>
+  left_join(abbrevs, by = "Tm") |>
+  left_join(teams, by = c("season", "Team"))
+
+# Drop players traded mid-season (team = "TOT"), since they have no single team record
+all_mvp <- all_mvp |>
+  filter(!is.na(W)) |>
+  mutate(win_pct = W / (W + L))
+
+# How many teammates also received MVP votes that season?
+all_mvp <- all_mvp |>
+  group_by(season, Tm) |>
+  mutate(teammates_voted = n() - 1) |>
+  ungroup()
+```
+
+```{r models}
+train <- all_mvp |> filter(season != 2011)
+test  <- all_mvp |> filter(season == 2011)
+
+model1 <- lm(Share ~ WS, data = train)                              # Win Shares only
+model2 <- lm(Share ~ WS + Age, data = train)                        # + age (not significant)
+model3 <- lm(Share ~ WS + W, data = train)                          # + team wins
+model4 <- lm(Share ~ WS + win_pct, data = train)                    # + team win %
+model5 <- lm(Share ~ WS + win_pct + teammates_voted, data = train)  # + teammates who got votes
+
+rose <- test |> filter(Player == "Derrick Rose")
+
+model_comparison <- tibble(
+  model = c("1: WS", "2: WS + age", "3: WS + team wins",
+            "4: WS + win %", "5: WS + win % + teammates"),
+  adj_r2 = c(summary(model1)$adj.r.squared,
+             summary(model2)$adj.r.squared,
+             summary(model3)$adj.r.squared,
+             summary(model4)$adj.r.squared,
+             summary(model5)$adj.r.squared),
+  rose_predicted = c(predict(model1, rose),
+                     predict(model2, rose),
+                     predict(model3, rose),
+                     predict(model4, rose),
+                     predict(model5, rose))
+) |>
+  mutate(rose_gap = rose$Share - rose_predicted)
+
+knitr::kable(model_comparison, digits = 3)
+```
+
+```{r predictions-2011}
+test |>
+  mutate(predicted = predict(model4, newdata = test)) |>
+  select(Player, WS, win_pct, Share, predicted) |>
+  arrange(desc(predicted)) |>
+  knitr::kable(digits = 3)
+```
+
+Win Shares was the strongest predictor of vote share, and team win percentage also mattered; age did not. Even after accounting for Win Shares, team win percentage, and teammates splitting votes, the model predicted Rose would receive 39% of the vote share. Instead, he got 98%. Something beyond the stats, most likely the story of a 22-year-old leading his hometown team to the league's best record, drove voters in 2011.
+
+## Comparing Rose to other MVP winners
+
+```{r winners}
+all_mvp |>
+  filter(Rank == 1) |>
+  select(season, Player, WS, ws_48, win_pct) |>
+  arrange(WS) |>
+  knitr::kable(digits = 3)
+```
+
+Rose's 13.1 Win Shares is the second-lowest among the ten MVP winners from 2006 to 2015. LeBron's 15.6 would have been close to a typical MVP total.
+
+## Conclusion
+
+Based on what voters typically reward, LeBron James was the stronger MVP choice: he led every statistic I examined, his season was in line with past MVP winners, and my model gave him the highest predicted vote share (44.5% vs. Rose's 34.9%). Rose's MVP was earned through team success and a compelling story, but not through the numbers.
